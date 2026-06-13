@@ -1,3 +1,4 @@
+//src\lib\supabaseHelpers.ts
 import type { PostgrestError } from "@supabase/supabase-js";
 
 export function friendlyError(error: PostgrestError | Error | null | unknown, fallback = "Something went wrong") {

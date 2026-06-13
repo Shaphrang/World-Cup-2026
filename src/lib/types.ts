@@ -1,3 +1,4 @@
+//src\lib\types.ts
 export type UUID = string;
 export type JsonRecord = Record<string, unknown>;
 
