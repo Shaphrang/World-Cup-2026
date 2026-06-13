@@ -1,0 +1,2 @@
+import { Inbox } from "lucide-react";
+export function EmptyState({ title="No records", description="Create a record to get started." }: {title?: string; description?: string}) { return <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center"><Inbox className="mx-auto mb-3 h-10 w-10 text-slate-400"/><h3 className="font-semibold text-slate-900">{title}</h3><p className="mt-1 text-sm text-slate-500">{description}</p></div>; }

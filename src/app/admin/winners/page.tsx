@@ -1,0 +1,2 @@
+"use client"; import { CrudPage } from "@/components/admin/CrudPage"; import type { Winner } from "@/lib/types";
+export default function Winners(){ return <CrudPage<Winner> title="Winners" table="winners" columns={[{header:'Prize',accessor:'prize_title'},{header:'Profile',accessor:'profile_id'},{header:'Published',accessor:r=>r.is_published?'Yes':'No'}]} fields={[{name:'profile_id',label:'Profile ID'},{name:'match_id',label:'Match ID'},{name:'prize_title',label:'Prize Title'},{name:'is_published',label:'Published',type:'checkbox'}]} initialRecord={{is_published:false}}/> }

@@ -1,0 +1,2 @@
+"use client"; import { CrudPage } from "@/components/admin/CrudPage"; import type { Team } from "@/lib/types";
+export default function Teams(){ return <CrudPage<Team> title="Teams" table="teams" columns={[{header:'Name',accessor:'name'},{header:'Code',accessor:'code'},{header:'Group',accessor:'group_name'}]} fields={[{name:'name',label:'Name',required:true},{name:'code',label:'Code'},{name:'flag_url',label:'Flag URL',type:'url'},{name:'group_name',label:'Group'}]}/> }
