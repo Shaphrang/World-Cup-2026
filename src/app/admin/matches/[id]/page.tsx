@@ -9,20 +9,15 @@ import {
   CalendarClock,
   CheckCircle2,
   Goal,
-  Plus,
   RefreshCw,
-  Save,
   Shield,
   Trophy,
   Users,
 } from "lucide-react";
 
 import { supabase } from "@/lib/supabaseClient";
-import { DataTable } from "@/components/admin/DataTable";
 import { LoadingSpinner } from "@/components/admin/LoadingSpinner";
 import { friendlyError, formatDateTime } from "@/lib/supabaseHelpers";
-
-type JsonRecord = Record<string, unknown>;
 
 type TeamRow = {
   id: string;
@@ -32,95 +27,89 @@ type TeamRow = {
 
 type MatchRow = {
   id: string;
+  match_title: string | null;
+  stage: string | null;
+
   team_a_id: string;
+  team_a_name: string | null;
+  team_a_short_name: string | null;
+
   team_b_id: string;
-  match_title?: string | null;
-  stage?: string | null;
+  team_b_name: string | null;
+  team_b_short_name: string | null;
+
   match_start_at: string;
   prediction_lock_at: string;
-  team_a_score?: number | null;
-  team_b_score?: number | null;
+
+  team_a_score: number | null;
+  team_b_score: number | null;
   status: string;
-  teams_a?: TeamRow | null;
-  teams_b?: TeamRow | null;
 };
 
-type PlayerRow = {
-  id: string;
-  team_id: string;
+type MatchPlayerRow = {
+  match_id: string;
+  player_id: string;
   player_name: string;
-  jersey_no?: number | null;
-  position?: string | null;
-  is_active?: boolean;
+  jersey_no: number | null;
+  position: string | null;
+  team_id: string;
+  team_name: string | null;
+  team_short_name: string | null;
 };
 
-type GoalRow = {
+type MatchGoalRow = {
   id: string;
   match_id: string;
-  player_id: string;
-  team_id?: string | null;
-  minute?: number | null;
-  created_at?: string;
-  players?: {
-    id: string;
-    player_name: string;
-  } | null;
-  teams?: TeamRow | null;
-  [key: string]: unknown;
+  player_id: string | null;
+  team_id: string;
 };
 
-type OneOrMany<T> = T | T[] | null | undefined;
-
-type RawMatchRow = Omit<MatchRow, "teams_a" | "teams_b"> & {
-  teams_a?: OneOrMany<TeamRow>;
-  teams_b?: OneOrMany<TeamRow>;
-};
-
-type RawGoalRow = {
-  id: string;
+type ParticipantRow = {
+  prediction_id: string;
   match_id: string;
-  player_id: string;
-  team_id?: string | null;
-  minute?: number | null;
-  created_at?: string;
-  players?: OneOrMany<{
-    id: string;
-    player_name: string;
-  }>;
-  teams?: OneOrMany<TeamRow>;
-  [key: string]: unknown;
+  user_id: string;
+  full_name: string | null;
+  avatar_url: string | null;
+
+  predicted_team_a_score: number;
+  predicted_team_b_score: number;
+  predicted_total_goals: number;
+
+  predicted_player_id: string | null;
+  predicted_player_name: string | null;
+
+  exact_score_points: number;
+  total_goals_points: number;
+  player_points: number;
+  points_total: number;
+
+  is_evaluated: boolean;
+  created_at: string;
 };
 
-function normalizeGoalRows(rows: unknown[]): GoalRow[] {
-  return rows.map((row) => {
-    const item = row as RawGoalRow;
-
-    const normalized: GoalRow = {
-      ...item,
-      players: singleRelation(item.players),
-      teams: singleRelation(item.teams),
-    };
-
-    return normalized;
-  });
+function shortTeamName(name?: string | null, shortName?: string | null) {
+  return shortName || name || "Team";
 }
 
-function singleRelation<T>(value: OneOrMany<T>): T | null {
-  if (Array.isArray(value)) {
-    return value[0] ?? null;
+function statusClass(status?: string | null) {
+  switch (status) {
+    case "finalized":
+      return "bg-emerald-100 text-emerald-700 ring-emerald-200";
+    case "completed":
+      return "bg-blue-100 text-blue-700 ring-blue-200";
+    case "live":
+      return "bg-rose-100 text-rose-700 ring-rose-200";
+    case "locked":
+      return "bg-amber-100 text-amber-700 ring-amber-200";
+    case "cancelled":
+      return "bg-slate-200 text-slate-600 ring-slate-300";
+    default:
+      return "bg-cyan-100 text-cyan-700 ring-cyan-200";
   }
-
-  return value ?? null;
 }
 
-function normalizeMatch(row: unknown): MatchRow {
-  const item = row as RawMatchRow;
-
-  return {
-    ...item,
-    teams_a: singleRelation(item.teams_a),
-    teams_b: singleRelation(item.teams_b),
-  };
+function predictionLabel(row: ParticipantRow, teamA: string, teamB: string) {
+  return `${teamA} ${row.predicted_team_a_score} - ${row.predicted_team_b_score} ${teamB}`;
 }
 
 export default function MatchDetail({
@@ -131,63 +120,80 @@ export default function MatchDetail({
   const { id } = use(params);
 
   const [match, setMatch] = useState<MatchRow | null>(null);
-  const [players, setPlayers] = useState<PlayerRow[]>([]);
-  const [goals, setGoals] = useState<GoalRow[]>([]);
-
-  const [participants, setParticipants] = useState<JsonRecord[]>([]);
-  const [goalGroups, setGoalGroups] = useState<JsonRecord[]>([]);
-  const [playerGroups, setPlayerGroups] = useState<JsonRecord[]>([]);
+  const [players, setPlayers] = useState<MatchPlayerRow[]>([]);
+  const [participants, setParticipants] = useState<ParticipantRow[]>([]);
 
   const [score, setScore] = useState({
     a: "",
     b: "",
   });
 
-  const [goal, setGoal] = useState({
-    player_id: "",
-    minute: "",
-  });
+  const [selectedScorerIds, setSelectedScorerIds] = useState<string[]>([]);
 
   const [loading, setLoading] = useState(true);
-  const [savingScore, setSavingScore] = useState(false);
-  const [addingGoal, setAddingGoal] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
 
-  const playerOptions = useMemo(() => {
-    return players.map((player) => {
-      const teamName =
-        player.team_id === match?.team_a_id
-          ? match?.teams_a?.name
-          : player.team_id === match?.team_b_id
-            ? match?.teams_b?.name
-            : "";
+  const isFinalized = match?.status === "finalized";
 
-      return {
-        ...player,
-        label: teamName
-          ? `${player.player_name} — ${teamName}`
-          : player.player_name,
-      };
-    });
-  }, [players, match]);
+  const teamAName = match?.team_a_name ?? "Team A";
+  const teamBName = match?.team_b_name ?? "Team B";
+
+  const teamAShortName = shortTeamName(
+    match?.team_a_name,
+    match?.team_a_short_name
+  );
+
+  const teamBShortName = shortTeamName(
+    match?.team_b_name,
+    match?.team_b_short_name
+  );
+
+  const teamAPlayers = useMemo(() => {
+    return players.filter((player) => player.team_id === match?.team_a_id);
+  }, [players, match?.team_a_id]);
+
+  const teamBPlayers = useMemo(() => {
+    return players.filter((player) => player.team_id === match?.team_b_id);
+  }, [players, match?.team_b_id]);
+
+  const selectedScorers = useMemo(() => {
+    const selectedSet = new Set(selectedScorerIds);
+
+    return players.filter((player) => selectedSet.has(player.player_id));
+  }, [players, selectedScorerIds]);
 
   async function load() {
     setLoading(true);
 
-    const { data, error } = await supabase
-      .from("matches")
+    const { data: matchData, error: matchError } = await supabase
+      .from("fixtures_view")
       .select(
-        "id,team_a_id,team_b_id,match_title,stage,match_start_at,prediction_lock_at,team_a_score,team_b_score,status,teams_a:teams!matches_home_team_id_fkey(id,name,short_name),teams_b:teams!matches_away_team_id_fkey(id,name,short_name)"
+        `
+        id,
+        match_title,
+        stage,
+        team_a_id,
+        team_a_name,
+        team_a_short_name,
+        team_b_id,
+        team_b_name,
+        team_b_short_name,
+        match_start_at,
+        prediction_lock_at,
+        team_a_score,
+        team_b_score,
+        status
+      `
       )
       .eq("id", id)
       .single();
 
-    if (error) {
+    if (matchError) {
       setLoading(false);
-      return Swal.fire("Load failed", friendlyError(error), "error");
+      return Swal.fire("Load failed", friendlyError(matchError), "error");
     }
 
-    const currentMatch = normalizeMatch(data);
+    const currentMatch = matchData as MatchRow;
 
     setMatch(currentMatch);
 
@@ -204,48 +210,44 @@ export default function MatchDetail({
           : String(currentMatch.team_b_score),
     });
 
-    if (currentMatch.team_a_id && currentMatch.team_b_id) {
-      const { data: playerRows } = await supabase
-        .from("players")
-        .select("id,team_id,player_name,jersey_no,position,is_active")
-        .in("team_id", [currentMatch.team_a_id, currentMatch.team_b_id])
-        .eq("is_active", true)
-        .order("player_name", { ascending: true });
+    const [{ data: playerRows }, { data: goalRows }, { data: participantRows }] =
+      await Promise.all([
+        supabase
+          .from("match_players_view")
+          .select(
+            `
+            match_id,
+            player_id,
+            player_name,
+            jersey_no,
+            position,
+            team_id,
+            team_name,
+            team_short_name
+          `
+          )
+          .eq("match_id", id)
+          .order("player_name", { ascending: true }),
 
-      setPlayers((playerRows ?? []) as PlayerRow[]);
-    }
+        supabase
+          .from("match_goals")
+          .select("id,match_id,player_id,team_id")
+          .eq("match_id", id),
 
-    const [
-      { data: goalRows },
-      { data: participantRows },
-      { data: goalGroupRows },
-      { data: playerGroupRows },
-    ] = await Promise.all([
-      supabase
-        .from("match_goals")
-        .select(
-          "id,match_id,player_id,team_id,minute,created_at,players(id,player_name),teams(id,name,short_name)"
-        )
-        .eq("match_id", id)
-        .order("minute", { ascending: true }),
+        supabase.rpc("get_match_participants", {
+          p_match_id: id,
+        }),
+      ]);
 
-      supabase.rpc("get_match_participants", {
-        p_match_id: id,
-      }),
+    setPlayers((playerRows ?? []) as MatchPlayerRow[]);
 
-      supabase.rpc("get_match_goal_prediction_groups", {
-        p_match_id: id,
-      }),
+    const existingScorerIds = ((goalRows ?? []) as MatchGoalRow[])
+      .map((goal) => goal.player_id)
+      .filter((playerId): playerId is string => Boolean(playerId));
 
-      supabase.rpc("get_match_player_prediction_groups", {
-        p_match_id: id,
-      }),
-    ]);
+    setSelectedScorerIds([...new Set(existingScorerIds)]);
 
-    setGoals(normalizeGoalRows(goalRows ?? []));
-    setParticipants((participantRows ?? []) as JsonRecord[]);
-    setGoalGroups((goalGroupRows ?? []) as JsonRecord[]);
-    setPlayerGroups((playerGroupRows ?? []) as JsonRecord[]);
+    setParticipants((participantRows ?? []) as ParticipantRow[]);
 
     setLoading(false);
   }
@@ -255,82 +257,27 @@ export default function MatchDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  async function saveScore() {
-    if (score.a === "" || score.b === "") return;
+  function toggleScorer(playerId: string) {
+    if (isFinalized) return;
 
-    setSavingScore(true);
+    setSelectedScorerIds((current) => {
+      if (current.includes(playerId)) {
+        return current.filter((idValue) => idValue !== playerId);
+      }
 
-    const { error } = await supabase
-      .from("matches")
-      .update({
-        team_a_score: Number(score.a),
-        team_b_score: Number(score.b),
-        status: "completed",
-      })
-      .eq("id", id);
-
-    setSavingScore(false);
-
-    if (error) {
-      return Swal.fire("Score failed", friendlyError(error), "error");
-    }
-
-    await load();
-
-    Swal.fire({
-      title: "Saved",
-      text: "Final score saved.",
-      icon: "success",
-      timer: 1400,
-      showConfirmButton: false,
-    });
-  }
-
-  async function addGoal(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-
-    const selectedPlayer = players.find((p) => p.id === goal.player_id);
-
-    if (!selectedPlayer) {
-      return Swal.fire(
-        "Missing player",
-        "Please select a valid player.",
-        "warning"
-      );
-    }
-
-    setAddingGoal(true);
-
-    const { error } = await supabase.from("match_goals").insert({
-      match_id: id,
-      player_id: goal.player_id,
-      team_id: selectedPlayer.team_id,
-      minute: goal.minute ? Number(goal.minute) : null,
-    });
-
-    setAddingGoal(false);
-
-    if (error) {
-      return Swal.fire("Goal failed", friendlyError(error), "error");
-    }
-
-    setGoal({
-      player_id: "",
-      minute: "",
-    });
-
-    await load();
-
-    Swal.fire({
-      title: "Added",
-      text: "Goal scorer added.",
-      icon: "success",
-      timer: 1200,
-      showConfirmButton: false,
+      return [...current, playerId];
     });
   }
 
   async function finalize() {
+    if (isFinalized) {
+      return Swal.fire(
+        "Already finalized",
+        "This match has already been finalized.",
+        "info"
+      );
+    }
+
     if (score.a === "" || score.b === "") {
       return Swal.fire(
         "Score required",
@@ -339,12 +286,32 @@ export default function MatchDetail({
       );
     }
 
+    const teamAScore = Number(score.a);
+    const teamBScore = Number(score.b);
+
+    if (Number.isNaN(teamAScore) || Number.isNaN(teamBScore)) {
+      return Swal.fire("Invalid score", "Score must be a valid number.", "warning");
+    }
+
+    if (teamAScore < 0 || teamBScore < 0) {
+      return Swal.fire("Invalid score", "Score cannot be negative.", "warning");
+    }
+
+    if (teamAScore + teamBScore > 0 && selectedScorerIds.length === 0) {
+      return Swal.fire(
+        "Goal scorer required",
+        "Please select at least one goal scorer before finalizing.",
+        "warning"
+      );
+    }
+
     const ok = await Swal.fire({
       title: "Finalize match?",
-      text: "Predictions and winners will be calculated.",
+      text: "This will save the final score, save selected goal scorers, and calculate prediction points.",
       icon: "warning",
       showCancelButton: true,
       confirmButtonText: "Finalize",
+      cancelButtonText: "Cancel",
       confirmButtonColor: "#047857",
     });
 
@@ -355,8 +322,8 @@ export default function MatchDetail({
     const { error: scoreError } = await supabase
       .from("matches")
       .update({
-        team_a_score: Number(score.a),
-        team_b_score: Number(score.b),
+        team_a_score: teamAScore,
+        team_b_score: teamBScore,
         status: "completed",
       })
       .eq("id", id);
@@ -366,14 +333,52 @@ export default function MatchDetail({
       return Swal.fire("Score failed", friendlyError(scoreError), "error");
     }
 
-    const { error } = await supabase.rpc("finalize_match", {
+    const { error: deleteGoalError } = await supabase
+      .from("match_goals")
+      .delete()
+      .eq("match_id", id);
+
+    if (deleteGoalError) {
+      setFinalizing(false);
+      return Swal.fire(
+        "Goal scorer failed",
+        friendlyError(deleteGoalError),
+        "error"
+      );
+    }
+
+    if (selectedScorerIds.length > 0) {
+      const selectedRows = selectedScorerIds
+        .map((playerId) => players.find((player) => player.player_id === playerId))
+        .filter((player): player is MatchPlayerRow => Boolean(player))
+        .map((player) => ({
+          match_id: id,
+          player_id: player.player_id,
+          team_id: player.team_id,
+        }));
+
+      const { error: insertGoalError } = await supabase
+        .from("match_goals")
+        .insert(selectedRows);
+
+      if (insertGoalError) {
+        setFinalizing(false);
+        return Swal.fire(
+          "Goal scorer failed",
+          friendlyError(insertGoalError),
+          "error"
+        );
+      }
+    }
+
+    const { error: finalizeError } = await supabase.rpc("finalize_match", {
       p_match_id: id,
     });
 
     setFinalizing(false);
 
-    if (error) {
-      return Swal.fire("Finalize failed", friendlyError(error), "error");
+    if (finalizeError) {
+      return Swal.fire("Finalize failed", friendlyError(finalizeError), "error");
     }
 
     await load();
@@ -395,20 +400,17 @@ export default function MatchDetail({
     );
   }
 
-  const teamAName = match.teams_a?.name ?? "Team A";
-  const teamBName = match.teams_b?.name ?? "Team B";
-
   return (
-    <section className="space-y-5">
-      <div className="overflow-hidden rounded-[1.7rem] border border-slate-200 bg-white shadow-sm">
-        <div className="relative overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950 px-5 py-5 text-white sm:px-6">
+    <section className="space-y-4">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="relative overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950 px-5 py-5 text-white">
           <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-emerald-400/20 blur-3xl" />
           <div className="absolute -bottom-20 left-20 h-44 w-44 rounded-full bg-cyan-400/10 blur-3xl" />
 
           <div className="relative">
             <Link
               href="/admin/matches"
-              className="mb-4 inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/10 px-3 py-2 text-xs font-black text-white hover:bg-white/15"
+              className="mb-4 inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/15"
             >
               <ArrowLeft className="h-4 w-4" />
               Back to Matches
@@ -416,13 +418,12 @@ export default function MatchDetail({
 
             <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
               <div>
-                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-medium text-emerald-100">
                   <CalendarClock className="h-3.5 w-3.5" />
-                  {match.stage ?? "Fixture"} •{" "}
-                  {formatDateTime(match.match_start_at)}
+                  {match.stage ?? "Fixture"} • {formatDateTime(match.match_start_at)}
                 </div>
 
-                <h1 className="text-2xl font-black tracking-tight sm:text-3xl">
+                <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
                   {match.match_title || `${teamAName} vs ${teamBName}`}
                 </h1>
 
@@ -432,271 +433,182 @@ export default function MatchDetail({
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 text-center">
-                <p className="text-xs font-black uppercase tracking-wide text-slate-300">
-                  Current Score
+                <p className="text-xs font-medium uppercase tracking-wide text-slate-300">
+                  Final Score
                 </p>
 
-                <p className="mt-1 text-3xl font-black text-white">
+                <p className="mt-1 text-3xl font-semibold text-white">
                   {score.a === "" ? "-" : score.a} :{" "}
                   {score.b === "" ? "-" : score.b}
                 </p>
 
-                <p className="mt-1 text-xs font-bold uppercase text-emerald-200">
+                <span
+                  className={`mt-2 inline-flex rounded-full px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide ring-1 ${statusClass(
+                    match.status
+                  )}`}
+                >
                   {match.status ?? "upcoming"}
-                </p>
+                </span>
               </div>
             </div>
           </div>
         </div>
 
-        <div className="grid gap-4 border-b border-slate-100 bg-slate-50/80 p-5 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 border-b border-slate-100 bg-slate-50/80 p-4 sm:grid-cols-2 lg:grid-cols-4">
           <SummaryCard
-            icon={<Shield className="h-5 w-5" />}
+            icon={<Shield className="h-4 w-4" />}
             label="Team A"
             value={teamAName}
           />
 
           <SummaryCard
-            icon={<Shield className="h-5 w-5" />}
+            icon={<Shield className="h-4 w-4" />}
             label="Team B"
             value={teamBName}
           />
 
           <SummaryCard
-            icon={<Goal className="h-5 w-5" />}
-            label="Goals Added"
-            value={String(goals.length)}
+            icon={<Goal className="h-4 w-4" />}
+            label="Goal Scorers"
+            value={String(selectedScorerIds.length)}
           />
 
           <SummaryCard
-            icon={<Users className="h-5 w-5" />}
+            icon={<Users className="h-4 w-4" />}
             label="Participants"
             value={String(participants.length)}
           />
         </div>
 
-        <div className="grid gap-5 p-5 lg:grid-cols-2">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
+        <div className="p-4">
+          <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-col justify-between gap-3 border-b border-slate-100 bg-slate-50/70 px-4 py-4 sm:flex-row sm:items-center">
               <div>
-                <h2 className="font-black text-slate-950">Final Score</h2>
-                <p className="text-sm text-slate-500">
-                  Enter the official match score.
+                <h2 className="text-sm font-semibold text-slate-950">
+                  Final Score & Goal Scorers
+                </h2>
+
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Select all players who scored at least once. No minute is required.
                 </p>
               </div>
 
               <Trophy className="h-5 w-5 text-emerald-700" />
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <input
-                type="number"
-                min={0}
-                value={score.a}
-                onChange={(e) =>
-                  setScore({
-                    ...score,
-                    a: e.target.value,
-                  })
-                }
-                className="w-24 rounded-xl border border-slate-200 px-3 py-2.5 text-center text-lg font-black outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100"
-              />
-
-              <span className="font-black text-slate-500">-</span>
-
-              <input
-                type="number"
-                min={0}
-                value={score.b}
-                onChange={(e) =>
-                  setScore({
-                    ...score,
-                    b: e.target.value,
-                  })
-                }
-                className="w-24 rounded-xl border border-slate-200 px-3 py-2.5 text-center text-lg font-black outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100"
-              />
-
-              <button
-                onClick={saveScore}
-                disabled={score.a === "" || score.b === "" || savingScore}
-                className="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-black text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <Save className="h-4 w-4" />
-                {savingScore ? "Saving..." : "Save"}
-              </button>
-
-              <button
-                onClick={finalize}
-                disabled={score.a === "" || score.b === "" || finalizing}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                {finalizing ? "Finalizing..." : "Finalize"}
-              </button>
-            </div>
-          </div>
-
-          <form
-            onSubmit={addGoal}
-            className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-          >
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="font-black text-slate-950">Add Goal Scorer</h2>
-                <p className="text-sm text-slate-500">
-                  Select a player and enter the goal minute.
+            <div className="grid gap-5 p-4 lg:grid-cols-[320px_1fr]">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+                  Official Score
                 </p>
+
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <label className="mb-1 block text-[11px] font-medium text-slate-500">
+                      {teamAShortName}
+                    </label>
+
+                    <input
+                      type="number"
+                      min={0}
+                      value={score.a}
+                      disabled={isFinalized}
+                      onChange={(event) =>
+                        setScore({
+                          ...score,
+                          a: event.target.value,
+                        })
+                      }
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-center text-lg font-semibold text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100 disabled:text-slate-500"
+                    />
+                  </div>
+
+                  <span className="pt-5 text-sm font-medium text-slate-400">-</span>
+
+                  <div className="flex-1">
+                    <label className="mb-1 block text-[11px] font-medium text-slate-500">
+                      {teamBShortName}
+                    </label>
+
+                    <input
+                      type="number"
+                      min={0}
+                      value={score.b}
+                      disabled={isFinalized}
+                      onChange={(event) =>
+                        setScore({
+                          ...score,
+                          b: event.target.value,
+                        })
+                      }
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-center text-lg font-semibold text-slate-950 outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 disabled:bg-slate-100 disabled:text-slate-500"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={finalize}
+                  disabled={
+                    isFinalized || score.a === "" || score.b === "" || finalizing
+                  }
+                  className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {isFinalized
+                    ? "Finalized"
+                    : finalizing
+                      ? "Finalizing..."
+                      : "Finalize Match"}
+                </button>
+
+                {selectedScorers.length > 0 && (
+                  <div className="mt-4 rounded-lg bg-white p-3 ring-1 ring-slate-200">
+                    <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                      Selected Scorers
+                    </p>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      {selectedScorers.map((player) => (
+                        <span
+                          key={player.player_id}
+                          className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-100"
+                        >
+                          {player.player_name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              <Goal className="h-5 w-5 text-emerald-700" />
+              <div className="grid gap-4 md:grid-cols-2">
+                <ScorerPanel
+                  title={teamAName}
+                  players={teamAPlayers}
+                  selectedScorerIds={selectedScorerIds}
+                  disabled={isFinalized}
+                  onToggle={toggleScorer}
+                />
+
+                <ScorerPanel
+                  title={teamBName}
+                  players={teamBPlayers}
+                  selectedScorerIds={selectedScorerIds}
+                  disabled={isFinalized}
+                  onToggle={toggleScorer}
+                />
+              </div>
             </div>
-
-            <div className="flex flex-wrap gap-3">
-              <select
-                required
-                value={goal.player_id}
-                onChange={(e) =>
-                  setGoal({
-                    ...goal,
-                    player_id: e.target.value,
-                  })
-                }
-                className="min-w-60 flex-1 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100"
-              >
-                <option value="">Select player...</option>
-
-                {playerOptions.map((player) => (
-                  <option key={player.id} value={player.id}>
-                    {player.label}
-                  </option>
-                ))}
-              </select>
-
-              <input
-                type="number"
-                min={1}
-                placeholder="Minute"
-                value={goal.minute}
-                onChange={(e) =>
-                  setGoal({
-                    ...goal,
-                    minute: e.target.value,
-                  })
-                }
-                className="w-32 rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100"
-              />
-
-              <button
-                disabled={addingGoal}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <Plus className="h-4 w-4" />
-                {addingGoal ? "Adding..." : "Add"}
-              </button>
-            </div>
-          </form>
+          </div>
         </div>
       </div>
 
-      <AdminTableCard
-        title="Goal Scorers"
-        subtitle="Official goals added for this match."
-        action={
-          <button
-            onClick={() => void load()}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-700 hover:bg-slate-50"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            Refresh
-          </button>
-        }
-      >
-        <DataTable
-          data={goals}
-          columns={[
-            {
-              header: "Scorer",
-              accessor: (row) => row.players?.player_name ?? row.player_id,
-            },
-            {
-              header: "Team",
-              accessor: (row) => row.teams?.name ?? row.team_id,
-            },
-            {
-              header: "Minute",
-              accessor: "minute",
-            },
-          ]}
-          searchPlaceholder="Search goals..."
-        />
-      </AdminTableCard>
-
-      <AdminTableCard
-        title="Participants"
-        subtitle="Users who participated in this match prediction."
-      >
-        <DataTable
-          data={participants.map((row, index) => ({
-            id: String(row.id ?? index),
-            ...row,
-          }))}
-          columns={[
-            {
-              header: "Data",
-              accessor: (row) => (
-                <pre className="max-w-[900px] whitespace-pre-wrap break-words rounded-xl bg-slate-50 p-3 text-xs text-slate-700">
-                  {JSON.stringify(row, null, 2)}
-                </pre>
-              ),
-            },
-          ]}
-        />
-      </AdminTableCard>
-
-      <AdminTableCard
-        title="Goal Prediction Groups"
-        subtitle="Grouped prediction data for goal scorers."
-      >
-        <DataTable
-          data={goalGroups.map((row, index) => ({
-            id: String(row.id ?? index),
-            ...row,
-          }))}
-          columns={[
-            {
-              header: "Data",
-              accessor: (row) => (
-                <pre className="max-w-[900px] whitespace-pre-wrap break-words rounded-xl bg-slate-50 p-3 text-xs text-slate-700">
-                  {JSON.stringify(row, null, 2)}
-                </pre>
-              ),
-            },
-          ]}
-        />
-      </AdminTableCard>
-
-      <AdminTableCard
-        title="Player Prediction Groups"
-        subtitle="Grouped prediction data for selected players."
-      >
-        <DataTable
-          data={playerGroups.map((row, index) => ({
-            id: String(row.id ?? index),
-            ...row,
-          }))}
-          columns={[
-            {
-              header: "Data",
-              accessor: (row) => (
-                <pre className="max-w-[900px] whitespace-pre-wrap break-words rounded-xl bg-slate-50 p-3 text-xs text-slate-700">
-                  {JSON.stringify(row, null, 2)}
-                </pre>
-              ),
-            },
-          ]}
-        />
-      </AdminTableCard>
+      <ParticipantsTableCard
+        participants={participants}
+        teamAShortName={teamAShortName}
+        teamBShortName={teamBShortName}
+        onRefresh={() => void load()}
+      />
     </section>
   );
 }
@@ -711,45 +623,221 @@ function SummaryCard({
   value: string;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="mb-3 inline-flex rounded-xl bg-emerald-50 p-2 text-emerald-700">
+    <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+      <div className="mb-2 inline-flex rounded-lg bg-emerald-50 p-2 text-emerald-700">
         {icon}
       </div>
 
-      <p className="text-xs font-black uppercase tracking-wide text-slate-400">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
         {label}
       </p>
 
-      <p className="mt-1 truncate text-base font-black text-slate-950">
+      <p className="mt-1 truncate text-sm font-semibold text-slate-950">
         {value}
       </p>
     </div>
   );
 }
 
-function AdminTableCard({
+function ScorerPanel({
   title,
-  subtitle,
-  children,
-  action,
+  players,
+  selectedScorerIds,
+  disabled,
+  onToggle,
 }: {
   title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  action?: React.ReactNode;
+  players: MatchPlayerRow[];
+  selectedScorerIds: string[];
+  disabled: boolean;
+  onToggle: (playerId: string) => void;
 }) {
   return (
-    <div className="overflow-hidden rounded-[1.4rem] border border-slate-200 bg-white shadow-sm">
-      <div className="flex flex-col justify-between gap-3 border-b border-slate-100 bg-slate-50/80 px-5 py-4 sm:flex-row sm:items-center">
-        <div>
-          <h2 className="font-black text-slate-950">{title}</h2>
-          {subtitle && <p className="text-sm text-slate-500">{subtitle}</p>}
-        </div>
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
 
-        {action}
+        <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500">
+          {players.length} players
+        </span>
       </div>
 
-      <div className="p-4">{children}</div>
+      {players.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500">
+          No players found.
+        </div>
+      ) : (
+        <div className="grid max-h-[340px] gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+          {players.map((player) => {
+            const selected = selectedScorerIds.includes(player.player_id);
+
+            return (
+              <button
+                key={player.player_id}
+                type="button"
+                disabled={disabled}
+                onClick={() => onToggle(player.player_id)}
+                className={`rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed ${
+                  selected
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800 ring-1 ring-emerald-100"
+                    : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium">{player.player_name}</p>
+
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {player.position || "Player"}
+                      {player.jersey_no ? ` • #${player.jersey_no}` : ""}
+                    </p>
+                  </div>
+
+                  <span
+                    className={`mt-0.5 h-3.5 w-3.5 rounded-full border ${
+                      selected
+                        ? "border-emerald-600 bg-emerald-600"
+                        : "border-slate-300 bg-white"
+                    }`}
+                  />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParticipantsTableCard({
+  participants,
+  teamAShortName,
+  teamBShortName,
+  onRefresh,
+}: {
+  participants: ParticipantRow[];
+  teamAShortName: string;
+  teamBShortName: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-col justify-between gap-3 border-b border-slate-100 bg-slate-50/80 px-4 py-4 sm:flex-row sm:items-center">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-950">Participants</h2>
+
+          <p className="mt-0.5 text-xs text-slate-500">
+            Simple list of users with their score prediction and goal scorer
+            prediction.
+          </p>
+        </div>
+
+        <button
+          onClick={onRefresh}
+          className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+          type="button"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          Refresh
+        </button>
+      </div>
+
+      {participants.length === 0 ? (
+        <div className="flex min-h-[180px] items-center justify-center bg-white px-4 text-center">
+          <div>
+            <Users className="mx-auto mb-3 h-7 w-7 text-slate-300" />
+
+            <p className="text-sm font-medium text-slate-800">
+              No participants yet
+            </p>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Predictions will appear here after users submit.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-left text-xs">
+            <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-3 py-2.5">Participant</th>
+                <th className="px-3 py-2.5">Prediction</th>
+                <th className="px-3 py-2.5">Goal Scorer</th>
+                <th className="px-3 py-2.5">Points</th>
+                <th className="px-3 py-2.5">Submitted</th>
+                <th className="px-3 py-2.5">Status</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-slate-100 bg-white">
+              {participants.map((row) => (
+                <tr key={row.prediction_id} className="transition hover:bg-slate-50">
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-50 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-100">
+                        {(row.full_name || "P").charAt(0).toUpperCase()}
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-medium text-slate-900">
+                          {row.full_name || "Participant"}
+                        </p>
+
+                        <p className="text-[11px] text-slate-400">
+                          Total goals: {row.predicted_total_goals}
+                        </p>
+                      </div>
+                    </div>
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-700">
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-700 ring-1 ring-slate-200">
+                      {predictionLabel(row, teamAShortName, teamBShortName)}
+                    </span>
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-600">
+                    {row.predicted_player_name || "—"}
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <div className="flex flex-wrap gap-1">
+                      <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-100">
+                        {row.points_total} pts
+                      </span>
+
+                      {row.is_evaluated && (
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500 ring-1 ring-slate-200">
+                          Score {row.exact_score_points} • Goals{" "}
+                          {row.total_goals_points} • Scorer {row.player_points}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">
+                    {formatDateTime(row.created_at)}
+                  </td>
+
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <span
+                      className={`rounded-full px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide ring-1 ${
+                        row.is_evaluated
+                          ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
+                          : "bg-amber-50 text-amber-700 ring-amber-100"
+                      }`}
+                    >
+                      {row.is_evaluated ? "Evaluated" : "Submitted"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
