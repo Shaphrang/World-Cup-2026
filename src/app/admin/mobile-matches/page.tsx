@@ -9,7 +9,6 @@ import {
   Clock3,
   Loader2,
   RefreshCw,
-  Save,
   Search,
   Trophy,
   X,
@@ -86,7 +85,6 @@ type MatchGoalRow = {
 type InlineMatchState = {
   team_a_score: string;
   team_b_score: string;
-  status: string;
   selected_scorer_ids: string[];
 };
 
@@ -95,16 +93,9 @@ type PickerState = {
   query: string;
 } | null;
 
-const ACTIVE_MATCH_LIMIT = 30;
+const ACTIVE_MATCH_LIMIT = 20;
 const PLAYER_PAGE_SIZE = 1000;
 const SCORE_OPTIONS = Array.from({ length: 11 }, (_, index) => String(index));
-const EDITABLE_STATUS_OPTIONS = [
-  { value: "upcoming", label: "Upcoming" },
-  { value: "locked", label: "Locked" },
-  { value: "live", label: "Live" },
-  { value: "completed", label: "Completed" },
-];
-
 function scoreToInput(value: number | null | undefined) {
   return value === null || value === undefined ? "" : String(value);
 }
@@ -124,54 +115,19 @@ function normalizedStatus(status?: string | null) {
   return String(status ?? "upcoming").toLowerCase();
 }
 
-function editableStatus(status?: string | null) {
-  const normalized = normalizedStatus(status);
-
-  if (
-    normalized === "upcoming" ||
-    normalized === "locked" ||
-    normalized === "live" ||
-    normalized === "completed"
-  ) {
-    return normalized;
-  }
-
-  return "upcoming";
-}
-
 function isClosedStatus(status?: string | null) {
   const normalized = normalizedStatus(status);
   return normalized === "finalized" || normalized === "cancelled";
 }
 
-function statusLabel(status?: string | null) {
-  const normalized = normalizedStatus(status);
+function isNotUpdatedUpcoming(row: FixtureViewRow) {
+  const normalized = normalizedStatus(row.status);
 
-  if (normalized === "locked") return "Locked";
-  if (normalized === "live") return "Live";
-  if (normalized === "completed") return "Completed";
-  if (normalized === "finalized") return "Finalized";
-  if (normalized === "cancelled") return "Cancelled";
-
-  return "Upcoming";
-}
-
-function statusChipClass(status?: string | null) {
-  const normalized = normalizedStatus(status);
-
-  if (normalized === "completed") {
-    return "bg-amber-100 text-amber-800 ring-amber-200";
-  }
-
-  if (normalized === "live") {
-    return "bg-rose-100 text-rose-700 ring-rose-200";
-  }
-
-  if (normalized === "locked") {
-    return "bg-indigo-100 text-indigo-700 ring-indigo-200";
-  }
-
-  return "bg-emerald-100 text-emerald-700 ring-emerald-200";
+  return (
+    (normalized === "upcoming" || row.status === null) &&
+    row.team_a_score === null &&
+    row.team_b_score === null
+  );
 }
 
 function shortTeamLabel(team?: TeamMini | null, fallback = "Team") {
@@ -213,7 +169,6 @@ function createInlineState(
   return {
     team_a_score: scoreToInput(row.team_a_score),
     team_b_score: scoreToInput(row.team_b_score),
-    status: editableStatus(row.status),
     selected_scorer_ids: selectedScorerIds,
   };
 }
@@ -292,7 +247,9 @@ export default function MobileMatchUpdatePage() {
         status
       `,
       )
-      .or("status.is.null,status.not.in.(finalized,cancelled)")
+      .or("status.is.null,status.eq.upcoming")
+      .is("team_a_score", null)
+      .is("team_b_score", null)
       .order("match_start_at", { ascending: true })
       .limit(ACTIVE_MATCH_LIMIT);
 
@@ -307,7 +264,7 @@ export default function MobileMatchUpdatePage() {
     }
 
     const mappedRows = ((data ?? []) as FixtureViewRow[])
-      .filter((row) => !isClosedStatus(row.status))
+      .filter(isNotUpdatedUpcoming)
       .map((row) => ({
         id: row.id,
         match_title: row.match_title,
@@ -468,7 +425,6 @@ export default function MobileMatchUpdatePage() {
         ...(current[matchId] ?? {
           team_a_score: "",
           team_b_score: "",
-          status: "upcoming",
           selected_scorer_ids: [],
         }),
         ...patch,
@@ -481,7 +437,6 @@ export default function MobileMatchUpdatePage() {
       const state = current[matchId] ?? {
         team_a_score: "",
         team_b_score: "",
-        status: "upcoming",
         selected_scorer_ids: [],
       };
 
@@ -503,32 +458,20 @@ export default function MobileMatchUpdatePage() {
     updateInline(matchId, { selected_scorer_ids: [] });
   }
 
-  async function saveMatchUpdate(row: MatchRow, finalize = false) {
-    if (isClosedStatus(row.status)) {
-      Swal.fire("Already closed", "This match is already finalized or cancelled.", "info");
-      return;
-    }
-
+  async function finalizeMatch(row: MatchRow) {
     const inline = inlineByMatch[row.id] ?? createInlineState(row);
-    const nextStatus = finalize ? "completed" : editableStatus(inline.status);
     const hasTeamAScore = inline.team_a_score.trim() !== "";
     const hasTeamBScore = inline.team_b_score.trim() !== "";
-    const hasAnyScore = hasTeamAScore || hasTeamBScore;
-    const scoreRequired = finalize || nextStatus === "completed";
 
-    if ((scoreRequired || hasAnyScore) && (!hasTeamAScore || !hasTeamBScore)) {
-      Swal.fire(
-        "Score required",
-        "Select score for both teams.",
-        "warning",
-      );
+    if (!hasTeamAScore || !hasTeamBScore) {
+      Swal.fire("Score required", "Select score for both teams.", "warning");
       return;
     }
 
-    const teamAScore = hasTeamAScore ? parseScore(inline.team_a_score) : null;
-    const teamBScore = hasTeamBScore ? parseScore(inline.team_b_score) : null;
+    const teamAScore = parseScore(inline.team_a_score);
+    const teamBScore = parseScore(inline.team_b_score);
 
-    if ((scoreRequired || hasAnyScore) && (teamAScore === null || teamBScore === null)) {
+    if (teamAScore === null || teamBScore === null) {
       Swal.fire(
         "Invalid score",
         "Scores must be selected between 0 and 10.",
@@ -537,8 +480,7 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    const shouldSaveScore = scoreRequired || hasAnyScore;
-    const totalGoals = shouldSaveScore ? Number(teamAScore) + Number(teamBScore) : 0;
+    const totalGoals = teamAScore + teamBScore;
     const selectedScorerIds = inline.selected_scorer_ids;
     const players = playersByMatch[row.id] ?? [];
     const selectedRows = selectedScorerIds
@@ -547,7 +489,7 @@ export default function MobileMatchUpdatePage() {
       )
       .filter((player): player is MatchPlayerRow => Boolean(player));
 
-    if (shouldSaveScore && selectedRows.length !== selectedScorerIds.length) {
+    if (selectedRows.length !== selectedScorerIds.length) {
       Swal.fire(
         "Invalid scorer",
         "One or more selected scorers are not valid for this match. Refresh and select again.",
@@ -556,7 +498,7 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    if (shouldSaveScore && totalGoals === 0 && selectedScorerIds.length > 0) {
+    if (totalGoals === 0 && selectedScorerIds.length > 0) {
       Swal.fire(
         "Check scorers",
         "For a 0 - 0 match, remove all goal scorers.",
@@ -565,7 +507,7 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    if (scoreRequired && totalGoals > 0 && selectedScorerIds.length === 0) {
+    if (totalGoals > 0 && selectedScorerIds.length === 0) {
       Swal.fire(
         "Goal scorer required",
         "Select at least one scorer. For 0 - 0, no scorer is needed.",
@@ -574,38 +516,26 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    if (finalize) {
-      const confirm = await Swal.fire({
-        title: "Finalize match?",
-        html: `<b>${matchDisplayName(row)}</b><br/>Score: ${teamAScore} - ${teamBScore}<br/>Scorers: ${selectedRows.length}`,
-        icon: "warning",
-        showCancelButton: true,
-        confirmButtonColor: "#16a34a",
-        confirmButtonText: "Finalize",
-        cancelButtonText: "Cancel",
-      });
+    const confirm = await Swal.fire({
+      title: "Finalize match?",
+      html: `<b>${matchDisplayName(row)}</b><br/>Score: ${teamAScore} - ${teamBScore}<br/>Scorers: ${selectedRows.length}`,
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonColor: "#16a34a",
+      confirmButtonText: "Finalize",
+      cancelButtonText: "Cancel",
+    });
 
-      if (!confirm.isConfirmed) return;
-    }
+    if (!confirm.isConfirmed) return;
 
     setBusyMatchId(row.id);
 
-    const updatePayload: {
-      status: string;
-      team_a_score?: number;
-      team_b_score?: number;
-    } = {
-      status: nextStatus,
-    };
-
-    if (shouldSaveScore && teamAScore !== null && teamBScore !== null) {
-      updatePayload.team_a_score = teamAScore;
-      updatePayload.team_b_score = teamBScore;
-    }
-
     const { error: scoreError } = await supabase
       .from("matches")
-      .update(updatePayload)
+      .update({
+        team_a_score: teamAScore,
+        team_b_score: teamBScore,
+      })
       .eq("id", row.id);
 
     if (scoreError) {
@@ -614,61 +544,51 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    if (shouldSaveScore) {
-      const { error: deleteGoalError } = await supabase
+    const { error: deleteGoalError } = await supabase
+      .from("match_goals")
+      .delete()
+      .eq("match_id", row.id);
+
+    if (deleteGoalError) {
+      setBusyMatchId(null);
+      Swal.fire("Goal scorer failed", friendlyError(deleteGoalError), "error");
+      return;
+    }
+
+    if (selectedRows.length > 0) {
+      const goalRows = selectedRows.map((player) => ({
+        match_id: row.id,
+        player_id: player.player_id,
+        team_id: player.team_id,
+      }));
+
+      const { error: insertGoalError } = await supabase
         .from("match_goals")
-        .delete()
-        .eq("match_id", row.id);
+        .insert(goalRows);
 
-      if (deleteGoalError) {
+      if (insertGoalError) {
         setBusyMatchId(null);
-        Swal.fire("Goal scorer failed", friendlyError(deleteGoalError), "error");
+        Swal.fire("Goal scorer failed", friendlyError(insertGoalError), "error");
         return;
-      }
-
-      if (selectedRows.length > 0) {
-        const goalRows = selectedRows.map((player) => ({
-          match_id: row.id,
-          player_id: player.player_id,
-          team_id: player.team_id,
-        }));
-
-        const { error: insertGoalError } = await supabase
-          .from("match_goals")
-          .insert(goalRows);
-
-        if (insertGoalError) {
-          setBusyMatchId(null);
-          Swal.fire(
-            "Goal scorer failed",
-            friendlyError(insertGoalError),
-            "error",
-          );
-          return;
-        }
       }
     }
 
-    if (finalize) {
-      const { error: finalizeError } = await supabase.rpc("finalize_match", {
-        p_match_id: row.id,
-      });
+    const { error: finalizeError } = await supabase.rpc("finalize_match", {
+      p_match_id: row.id,
+    });
 
-      if (finalizeError) {
-        setBusyMatchId(null);
-        Swal.fire("Finalize failed", friendlyError(finalizeError), "error");
-        return;
-      }
+    if (finalizeError) {
+      setBusyMatchId(null);
+      Swal.fire("Finalize failed", friendlyError(finalizeError), "error");
+      return;
     }
 
     setBusyMatchId(null);
     await loadActiveMatches(true);
 
     Swal.fire({
-      title: finalize ? "Finalized" : "Saved",
-      text: finalize
-        ? "Match finalized successfully."
-        : "Match update saved successfully.",
+      title: "Finalized",
+      text: "Match completed and points calculated successfully.",
       icon: "success",
       timer: 1200,
       showConfirmButton: false,
@@ -685,10 +605,10 @@ export default function MobileMatchUpdatePage() {
                 Admin Panel
               </p>
               <h1 className="mt-1 truncate text-xl font-black tracking-tight text-slate-950 sm:text-2xl">
-                Match Updates
+                Upcoming Match Updates
               </h1>
               <p className="mt-1 text-xs font-semibold text-slate-500">
-                Upcoming, live and completed matches pending finalization.
+                Select score and scorers, then finalize directly. Showing latest 20.
               </p>
             </div>
 
@@ -717,10 +637,10 @@ export default function MobileMatchUpdatePage() {
             <div className="flex min-h-[62dvh] flex-col items-center justify-center rounded-[1.75rem] border border-dashed border-emerald-200 bg-white/80 px-8 text-center shadow-sm backdrop-blur">
               <Trophy className="h-10 w-10 text-emerald-300" />
               <h2 className="mt-4 text-base font-black text-slate-950">
-                No pending matches
+                No upcoming matches to update
               </h2>
               <p className="mt-2 max-w-xs text-sm leading-6 text-slate-500">
-                All visible matches are finalized or cancelled.
+                All upcoming matches are already updated or no fixtures are available.
               </p>
             </div>
           ) : (
@@ -799,22 +719,6 @@ export default function MobileMatchUpdatePage() {
                         />
                       </div>
 
-                      <div className="grid grid-cols-[1fr_auto] items-center gap-2">
-                        <StatusSelect
-                          value={inline.status}
-                          disabled={closed || busy}
-                          onChange={(status) => updateInline(row.id, { status })}
-                        />
-
-                        <span
-                          className={`inline-flex h-11 items-center justify-center rounded-2xl px-3 text-[10px] font-black uppercase tracking-wide ring-1 ${statusChipClass(
-                            inline.status,
-                          )}`}
-                        >
-                          {statusLabel(inline.status)}
-                        </span>
-                      </div>
-
                       <button
                         type="button"
                         disabled={closed || busy}
@@ -836,36 +740,19 @@ export default function MobileMatchUpdatePage() {
 
                         <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
                       </button>
-
-                      <div className="grid grid-cols-2 gap-2 pt-1">
-                        <button
-                          type="button"
-                          disabled={closed || busy}
-                          onClick={() => void saveMatchUpdate(row, false)}
-                          className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-white px-3 text-xs font-black text-slate-800 shadow-sm ring-1 ring-slate-200 transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {busy ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Save className="h-4 w-4" />
-                          )}
-                          Save
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={!canFinalize}
-                          onClick={() => void saveMatchUpdate(row, true)}
-                          className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-slate-950 to-slate-800 px-3 text-xs font-black text-white shadow-lg shadow-slate-950/15 transition active:scale-[0.99] disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
-                        >
-                          {busy ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <CheckCircle2 className="h-4 w-4" />
-                          )}
-                          Finalize
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        disabled={!canFinalize}
+                        onClick={() => void finalizeMatch(row)}
+                        className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-slate-950 via-emerald-950 to-slate-800 px-4 text-sm font-black text-white shadow-lg shadow-emerald-950/15 transition active:scale-[0.99] disabled:cursor-not-allowed disabled:from-slate-200 disabled:via-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                      >
+                        {busy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="h-4 w-4" />
+                        )}
+                        Finalize Match
+                      </button>
                     </div>
                   </article>
                 );
@@ -944,31 +831,6 @@ function ScoreSelect({
       {SCORE_OPTIONS.map((score) => (
         <option key={score} value={score}>
           {score}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-function StatusSelect({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: string;
-  disabled: boolean;
-  onChange: (status: string) => void;
-}) {
-  return (
-    <select
-      value={editableStatus(value)}
-      disabled={disabled}
-      onChange={(event) => onChange(event.target.value)}
-      className="h-11 w-full appearance-none rounded-2xl border border-white/80 bg-white/85 px-3 text-sm font-black text-slate-900 shadow-sm outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-    >
-      {EDITABLE_STATUS_OPTIONS.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
         </option>
       ))}
     </select>
