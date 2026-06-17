@@ -1,16 +1,15 @@
+// src\app\admin\mobile-matches\page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import Swal from "sweetalert2";
 import {
+  Clock3,
   CheckCircle2,
   ChevronDown,
-  Clock3,
   Loader2,
   RefreshCw,
   Search,
-  ShieldCheck,
   Trophy,
   X,
 } from "lucide-react";
@@ -39,7 +38,7 @@ type FixtureViewRow = {
   prediction_lock_at: string | null;
   team_a_score: number | null;
   team_b_score: number | null;
-  status: string;
+  status: string | null;
 };
 
 type MatchRow = {
@@ -52,7 +51,7 @@ type MatchRow = {
   prediction_lock_at: string | null;
   team_a_score: number | null;
   team_b_score: number | null;
-  status: string;
+  status: string | null;
   teams_a: TeamMini;
   teams_b: TeamMini;
 };
@@ -86,7 +85,6 @@ type MatchGoalRow = {
 type InlineFinalizeState = {
   team_a_score: string;
   team_b_score: string;
-  status: string;
   selected_scorer_ids: string[];
 };
 
@@ -95,17 +93,9 @@ type PickerState = {
   query: string;
 } | null;
 
-const QUICK_MATCH_LIMIT = 10;
+const ACTIVE_MATCH_LIMIT = 30;
 const PLAYER_PAGE_SIZE = 1000;
-const CURRENT_MATCH_BUFFER_HOURS = 4;
-
-const STATUS_OPTIONS = [
-  { value: "upcoming", label: "Upcoming" },
-  { value: "locked", label: "Locked" },
-  { value: "live", label: "Live" },
-  { value: "completed", label: "Completed" },
-  { value: "cancelled", label: "Cancelled" },
-];
+const CLOSED_STATUS_FILTER = "(completed,finalized,cancelled)";
 
 function scoreToInput(value: number | null | undefined) {
   return value === null || value === undefined ? "" : String(value);
@@ -123,14 +113,25 @@ function normalizedStatus(status?: string | null) {
   return String(status ?? "upcoming").toLowerCase();
 }
 
-function isReadOnlyStatus(status?: string | null) {
+function isClosedStatus(status?: string | null) {
   const normalized = normalizedStatus(status);
-  return normalized === "finalized" || normalized === "cancelled";
+  return (
+    normalized === "completed" ||
+    normalized === "finalized" ||
+    normalized === "cancelled"
+  );
 }
 
-function isCompletedLike(status?: string | null) {
+function statusLabel(status?: string | null) {
   const normalized = normalizedStatus(status);
-  return normalized === "completed" || normalized === "finalized";
+
+  if (normalized === "locked") return "Locked";
+  if (normalized === "live") return "Live";
+  if (normalized === "completed") return "Completed";
+  if (normalized === "finalized") return "Finalized";
+  if (normalized === "cancelled") return "Cancelled";
+
+  return "Upcoming";
 }
 
 function shortTeamLabel(team?: TeamMini | null, fallback = "Team") {
@@ -167,7 +168,6 @@ function createInlineState(
   return {
     team_a_score: scoreToInput(row.team_a_score),
     team_b_score: scoreToInput(row.team_b_score),
-    status: row.status || "upcoming",
     selected_scorer_ids: selectedScorerIds,
   };
 }
@@ -222,13 +222,9 @@ export default function MobileMatchUpdatePage() {
   const [busyMatchId, setBusyMatchId] = useState<string | null>(null);
   const [picker, setPicker] = useState<PickerState>(null);
 
-  async function loadQuickMatches(showRefreshLoader = false) {
+  async function loadActiveMatches(showRefreshLoader = false) {
     if (showRefreshLoader) setRefreshing(true);
     else setLoading(true);
-
-    const activeFrom = new Date(
-      Date.now() - CURRENT_MATCH_BUFFER_HOURS * 60 * 60 * 1000,
-    ).toISOString();
 
     const { data, error } = await supabase
       .from("fixtures_view")
@@ -250,10 +246,9 @@ export default function MobileMatchUpdatePage() {
         status
       `,
       )
-      .gte("match_start_at", activeFrom)
-      .not("status", "in", "(finalized,cancelled)")
+      .not("status", "in", CLOSED_STATUS_FILTER)
       .order("match_start_at", { ascending: true })
-      .limit(QUICK_MATCH_LIMIT);
+      .limit(ACTIVE_MATCH_LIMIT);
 
     if (error) {
       setRows([]);
@@ -265,28 +260,30 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    const mappedRows = ((data ?? []) as FixtureViewRow[]).map((row) => ({
-      id: row.id,
-      match_title: row.match_title,
-      stage: row.stage,
-      team_a_id: row.team_a_id,
-      team_b_id: row.team_b_id,
-      match_start_at: row.match_start_at,
-      prediction_lock_at: row.prediction_lock_at,
-      team_a_score: row.team_a_score,
-      team_b_score: row.team_b_score,
-      status: row.status,
-      teams_a: {
-        id: row.team_a_id ?? "",
-        name: row.team_a_name ?? "Team A",
-        short_name: row.team_a_short_name,
-      },
-      teams_b: {
-        id: row.team_b_id ?? "",
-        name: row.team_b_name ?? "Team B",
-        short_name: row.team_b_short_name,
-      },
-    })) as MatchRow[];
+    const mappedRows = ((data ?? []) as FixtureViewRow[])
+      .filter((row) => !isClosedStatus(row.status))
+      .map((row) => ({
+        id: row.id,
+        match_title: row.match_title,
+        stage: row.stage,
+        team_a_id: row.team_a_id,
+        team_b_id: row.team_b_id,
+        match_start_at: row.match_start_at,
+        prediction_lock_at: row.prediction_lock_at,
+        team_a_score: row.team_a_score,
+        team_b_score: row.team_b_score,
+        status: row.status,
+        teams_a: {
+          id: row.team_a_id ?? "",
+          name: row.team_a_name ?? "Team A",
+          short_name: row.team_a_short_name,
+        },
+        teams_b: {
+          id: row.team_b_id ?? "",
+          name: row.team_b_name ?? "Team B",
+          short_name: row.team_b_short_name,
+        },
+      })) as MatchRow[];
 
     setRows(mappedRows);
 
@@ -331,8 +328,9 @@ export default function MobileMatchUpdatePage() {
     const playersByTeam = new Map<string, PlayerRow[]>();
 
     playersResult.data.forEach((player) => {
-      if (!playersByTeam.has(player.team_id))
+      if (!playersByTeam.has(player.team_id)) {
         playersByTeam.set(player.team_id, []);
+      }
       playersByTeam.get(player.team_id)?.push(player);
     });
 
@@ -387,7 +385,7 @@ export default function MobileMatchUpdatePage() {
   }
 
   useEffect(() => {
-    void loadQuickMatches();
+    void loadActiveMatches();
   }, []);
 
   const pickerMatch = useMemo(() => {
@@ -424,7 +422,6 @@ export default function MobileMatchUpdatePage() {
         ...(current[matchId] ?? {
           team_a_score: "",
           team_b_score: "",
-          status: "completed",
           selected_scorer_ids: [],
         }),
         ...patch,
@@ -437,7 +434,6 @@ export default function MobileMatchUpdatePage() {
       const state = current[matchId] ?? {
         team_a_score: "",
         team_b_score: "",
-        status: "completed",
         selected_scorer_ids: [],
       };
 
@@ -460,26 +456,12 @@ export default function MobileMatchUpdatePage() {
   }
 
   async function finalizeMatch(row: MatchRow) {
-    if (isReadOnlyStatus(row.status)) {
-      Swal.fire(
-        "Disabled",
-        "This match cannot be updated from mobile.",
-        "info",
-      );
+    if (isClosedStatus(row.status)) {
+      Swal.fire("Already closed", "This match is already closed.", "info");
       return;
     }
 
     const inline = inlineByMatch[row.id] ?? createInlineState(row);
-
-    if (inline.status !== "completed") {
-      Swal.fire(
-        "Set status to Completed",
-        "Choose Completed before finalizing the match.",
-        "warning",
-      );
-      return;
-    }
-
     const teamAScore = parseScore(inline.team_a_score);
     const teamBScore = parseScore(inline.team_b_score);
 
@@ -507,7 +489,7 @@ export default function MobileMatchUpdatePage() {
     if (totalGoals > 0 && selectedScorerIds.length === 0) {
       Swal.fire(
         "Goal scorer required",
-        "Select at least one actual goal scorer. If the match is 0 - 0, no scorer is needed.",
+        "Select at least one scorer. For 0 - 0, no scorer is needed.",
         "warning",
       );
       return;
@@ -531,10 +513,10 @@ export default function MobileMatchUpdatePage() {
 
     const confirm = await Swal.fire({
       title: "Finalize match?",
-      html: `<b>${matchDisplayName(row)}</b><br/>Final score: ${teamAScore} - ${teamBScore}<br/>Scorers: ${selectedRows.length}`,
+      html: `<b>${matchDisplayName(row)}</b><br/>Score: ${teamAScore} - ${teamBScore}<br/>Scorers: ${selectedRows.length}`,
       icon: "warning",
       showCancelButton: true,
-      confirmButtonColor: "#059669",
+      confirmButtonColor: "#16a34a",
       confirmButtonText: "Finalize",
       cancelButtonText: "Cancel",
     });
@@ -602,43 +584,39 @@ export default function MobileMatchUpdatePage() {
       return;
     }
 
-    await loadQuickMatches(true);
+    await loadActiveMatches(true);
 
     Swal.fire({
       title: "Finalized",
       text: "Match finalized successfully.",
       icon: "success",
-      timer: 1500,
+      timer: 1400,
       showConfirmButton: false,
     });
   }
 
   return (
-    <main className="min-h-dvh bg-slate-950 text-white">
-      <div className="mx-auto min-h-dvh w-full max-w-md bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.22),_transparent_34%),linear-gradient(180deg,#020617_0%,#0f172a_46%,#020617_100%)] pb-[calc(env(safe-area-inset-bottom)+24px)]">
-        <header className="sticky top-0 z-30 border-b border-white/10 bg-slate-950/85 px-4 pb-3 pt-[calc(env(safe-area-inset-top)+14px)] backdrop-blur-xl">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-200">
-                <ShieldCheck className="h-3 w-3" />
-                Mobile Admin
-              </div>
-
-              <h1 className="mt-3 text-xl font-black tracking-tight text-white">
-                Quick Match Update
+    <main className="min-h-dvh bg-slate-50 text-slate-950">
+      <div className="mx-auto w-full max-w-5xl px-3 pb-[calc(env(safe-area-inset-bottom)+24px)] pt-[calc(env(safe-area-inset-top)+12px)] sm:px-5 sm:pt-5">
+        <header className="sticky top-0 z-30 -mx-3 border-b border-slate-200/80 bg-slate-50/90 px-3 py-3 backdrop-blur-xl sm:static sm:mx-0 sm:rounded-3xl sm:border sm:bg-white sm:px-5 sm:shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-black uppercase tracking-[0.18em] text-emerald-700">
+                Admin Matches
+              </p>
+              <h1 className="mt-1 truncate text-xl font-black tracking-tight text-slate-950 sm:text-2xl">
+                Pending Final Updates
               </h1>
-
-              <p className="mt-1 max-w-[260px] text-xs leading-5 text-slate-400">
-                Next {QUICK_MATCH_LIMIT} matches only. Update score, scorers and
-                finalize fast.
+              <p className="mt-1 text-xs font-medium text-slate-500">
+                Showing matches not completed, finalized or cancelled.
               </p>
             </div>
 
             <button
               type="button"
-              onClick={() => void loadQuickMatches(true)}
+              onClick={() => void loadActiveMatches(true)}
               disabled={refreshing || loading}
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-white shadow-lg shadow-black/20 backdrop-blur transition active:scale-95 disabled:opacity-60"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-700 shadow-sm transition active:scale-95 disabled:opacity-60"
               title="Refresh"
             >
               {refreshing ? (
@@ -650,195 +628,138 @@ export default function MobileMatchUpdatePage() {
           </div>
         </header>
 
-        <section className="px-4 py-4">
+        <section className="mt-4">
           {loading ? (
-            <div className="flex min-h-[65dvh] items-center justify-center rounded-[2rem] border border-white/10 bg-white/[0.04]">
+            <div className="flex min-h-[62dvh] items-center justify-center rounded-[1.75rem] border border-slate-200 bg-white shadow-sm">
               <LoadingSpinner />
             </div>
           ) : rows.length === 0 ? (
-            <div className="flex min-h-[65dvh] flex-col items-center justify-center rounded-[2rem] border border-dashed border-white/15 bg-white/[0.04] px-8 text-center">
-              <Trophy className="h-10 w-10 text-slate-500" />
-              <h2 className="mt-4 text-base font-bold text-white">
-                No upcoming matches
+            <div className="flex min-h-[62dvh] flex-col items-center justify-center rounded-[1.75rem] border border-dashed border-slate-300 bg-white px-8 text-center shadow-sm">
+              <Trophy className="h-10 w-10 text-slate-300" />
+              <h2 className="mt-4 text-base font-black text-slate-950">
+                No pending matches
               </h2>
-              <p className="mt-2 text-sm leading-6 text-slate-400">
-                There are no active matches in the quick mobile queue.
+              <p className="mt-2 max-w-xs text-sm leading-6 text-slate-500">
+                Every match is already completed, finalized or cancelled.
               </p>
             </div>
           ) : (
-            <div className="space-y-4">
-              {rows.map((row, index) => {
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {rows.map((row) => {
                 const inline = inlineByMatch[row.id] ?? createInlineState(row);
                 const selectedPlayers = (playersByMatch[row.id] ?? []).filter(
                   (player) =>
                     inline.selected_scorer_ids.includes(player.player_id),
                 );
                 const busy = busyMatchId === row.id;
-                const readOnly = isReadOnlyStatus(row.status);
-                const completedTone = isCompletedLike(
-                  inline.status || row.status,
-                );
+                const closed = isClosedStatus(row.status);
+                const teamAScore = parseScore(inline.team_a_score);
+                const teamBScore = parseScore(inline.team_b_score);
+                const validScores = teamAScore !== null && teamBScore !== null;
+                const totalGoals = validScores ? teamAScore + teamBScore : 0;
                 const canFinalize =
-                  !readOnly &&
+                  !closed &&
                   !busy &&
-                  inline.status === "completed" &&
-                  inline.team_a_score.trim() !== "" &&
-                  inline.team_b_score.trim() !== "";
+                  validScores &&
+                  (totalGoals === 0 || selectedPlayers.length > 0);
 
                 return (
                   <article
                     key={row.id}
-                    className={`overflow-hidden rounded-[1.75rem] border shadow-2xl shadow-black/20 transition ${
-                      completedTone
-                        ? "border-emerald-300/20 bg-slate-900"
-                        : "border-white/10 bg-white/[0.07] backdrop-blur"
-                    }`}
+                    className="overflow-hidden rounded-[1.5rem] border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
                   >
-                    <div className="border-b border-white/10 p-4">
-                      <div className="mb-3 flex items-start justify-between gap-3">
+                    <div className="border-b border-slate-100 p-4">
+                      <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-white/10 px-2 text-[10px] font-black text-slate-200 ring-1 ring-white/10">
-                              {index + 1}
-                            </span>
+                          <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-emerald-700 ring-1 ring-emerald-100">
+                            {statusLabel(row.status)}
+                          </span>
 
-                            <span
-                              className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ring-1 ${
-                                completedTone
-                                  ? "bg-emerald-400/10 text-emerald-200 ring-emerald-300/15"
-                                  : "bg-cyan-400/10 text-cyan-200 ring-cyan-300/15"
-                              }`}
-                            >
-                              {inline.status || row.status || "upcoming"}
-                            </span>
-                          </div>
-
-                          <h2 className="mt-3 truncate text-base font-black tracking-tight text-white">
+                          <h2 className="mt-2 truncate text-base font-black text-slate-950">
                             {matchDisplayName(row)}
                           </h2>
 
-                          <p className="mt-1 text-xs font-medium text-slate-400">
+                          <p className="mt-1 truncate text-xs font-semibold text-slate-500">
                             {row.stage || "Match"}
                           </p>
                         </div>
 
-                        <div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-2 text-right">
-                          <div className="flex items-center justify-end gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                            <Clock3 className="h-3 w-3" />
-                            Start
-                          </div>
-                          <p className="mt-1 max-w-[112px] text-[11px] font-semibold leading-4 text-slate-300">
+                        <div className="shrink-0 rounded-2xl bg-slate-50 px-2.5 py-2 text-right ring-1 ring-slate-100">
+                          <Clock3 className="ml-auto h-3.5 w-3.5 text-slate-400" />
+                          <p className="mt-1 max-w-[94px] text-[10px] font-bold leading-4 text-slate-500">
                             {formatDateTime(row.match_start_at)}
                           </p>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+                      <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
                         <TeamBlock team={row.teams_a} />
-                        <span className="text-xs font-black text-slate-500">
+                        <span className="text-[10px] font-black text-slate-300">
                           VS
                         </span>
                         <TeamBlock team={row.teams_b} alignRight />
                       </div>
                     </div>
 
-                    <div className="space-y-4 p-4">
-                      <div>
-                        <SectionLabel>Final Score</SectionLabel>
+                    <div className="space-y-3 p-4">
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-2">
+                        <ScoreInput
+                          label={shortTeamLabel(row.teams_a, "A")}
+                          value={inline.team_a_score}
+                          disabled={closed || busy}
+                          onChange={(value) =>
+                            updateInline(row.id, { team_a_score: value })
+                          }
+                        />
 
-                        <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-3">
-                          <ScoreInput
-                            label={shortTeamLabel(row.teams_a, "A")}
-                            value={inline.team_a_score}
-                            disabled={readOnly || busy}
-                            onChange={(value) =>
-                              updateInline(row.id, { team_a_score: value })
-                            }
-                          />
+                        <span className="pb-3 text-lg font-black text-slate-300">
+                          -
+                        </span>
 
-                          <span className="pb-3 text-xl font-black text-slate-500">
-                            -
-                          </span>
+                        <ScoreInput
+                          label={shortTeamLabel(row.teams_b, "B")}
+                          value={inline.team_b_score}
+                          disabled={closed || busy}
+                          onChange={(value) =>
+                            updateInline(row.id, { team_b_score: value })
+                          }
+                        />
+                      </div>
 
-                          <ScoreInput
-                            label={shortTeamLabel(row.teams_b, "B")}
-                            value={inline.team_b_score}
-                            disabled={readOnly || busy}
-                            onChange={(value) =>
-                              updateInline(row.id, { team_b_score: value })
-                            }
-                          />
+                      <button
+                        type="button"
+                        disabled={closed || busy}
+                        onClick={() => setPicker({ matchId: row.id, query: "" })}
+                        className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-left transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-black uppercase tracking-wide text-slate-400">
+                            Goal scorers
+                          </p>
+                          <p className="mt-1 truncate text-sm font-bold text-slate-800">
+                            {selectedPlayers.length === 0
+                              ? "Select players"
+                              : selectedPlayers
+                                  .map((player) => player.player_name)
+                                  .join(", ")}
+                          </p>
                         </div>
-                      </div>
 
-                      <div>
-                        <SectionLabel>Goal Scorers</SectionLabel>
-
-                        <button
-                          type="button"
-                          disabled={readOnly || busy}
-                          onClick={() =>
-                            setPicker({ matchId: row.id, query: "" })
-                          }
-                          className="flex w-full items-center justify-between gap-3 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-left transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-sm font-bold text-white">
-                              {selectedPlayers.length === 0
-                                ? "Select actual scorers"
-                                : `${selectedPlayers.length} scorer${
-                                    selectedPlayers.length > 1 ? "s" : ""
-                                  } selected`}
-                            </p>
-
-                            <p className="mt-1 truncate text-xs text-slate-400">
-                              {selectedPlayers.length === 0
-                                ? "Multiple players allowed"
-                                : selectedPlayers
-                                    .map((player) => player.player_name)
-                                    .join(", ")}
-                            </p>
-                          </div>
-
-                          <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-                        </button>
-                      </div>
-
-                      <div>
-                        <SectionLabel>Set Status</SectionLabel>
-
-                        <select
-                          value={inline.status}
-                          disabled={readOnly || busy}
-                          onChange={(event) =>
-                            updateInline(row.id, { status: event.target.value })
-                          }
-                          className="h-12 w-full rounded-2xl border border-white/10 bg-black/30 px-4 text-sm font-bold text-white outline-none transition focus:border-emerald-300/40 focus:ring-4 focus:ring-emerald-400/10 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {STATUS_OPTIONS.map((status) => (
-                            <option
-                              key={status.value}
-                              value={status.value}
-                              className="bg-slate-950 text-white"
-                            >
-                              {status.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
+                      </button>
 
                       <button
                         type="button"
                         disabled={!canFinalize}
                         onClick={() => void finalizeMatch(row)}
-                        className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-emerald-500 px-4 py-4 text-sm font-black text-emerald-950 shadow-xl shadow-emerald-950/30 transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 disabled:shadow-none"
+                        className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 px-4 text-sm font-black text-white shadow-sm transition active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
                       >
                         {busy ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
                           <CheckCircle2 className="h-4 w-4" />
                         )}
-                        {busy ? "Finalizing..." : "Finalize Match"}
+                        {busy ? "Finalizing..." : "Finalize"}
                       </button>
                     </div>
                   </article>
@@ -875,15 +796,17 @@ function TeamBlock({
 }) {
   return (
     <div
-      className={`flex items-center gap-2 ${alignRight ? "justify-end" : ""}`}
+      className={`flex min-w-0 items-center gap-2 ${
+        alignRight ? "justify-end text-right" : ""
+      }`}
     >
       {!alignRight && <TeamAvatar team={team} />}
 
-      <div className={alignRight ? "text-right" : ""}>
-        <p className="truncate text-sm font-black text-white">
+      <div className="min-w-0">
+        <p className="truncate text-sm font-black text-slate-950">
           {shortTeamLabel(team)}
         </p>
-        <p className="mt-0.5 max-w-[118px] truncate text-[10px] font-medium text-slate-500">
+        <p className="mt-0.5 truncate text-[10px] font-semibold text-slate-400">
           {team.name}
         </p>
       </div>
@@ -895,17 +818,9 @@ function TeamBlock({
 
 function TeamAvatar({ team }: { team: TeamMini }) {
   return (
-    <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-xs font-black text-white shadow-inner">
+    <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-xs font-black text-slate-700 ring-1 ring-slate-200">
       {initials(team.short_name || team.name)}
     </span>
-  );
-}
-
-function SectionLabel({ children }: { children: ReactNode }) {
-  return (
-    <p className="mb-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
-      {children}
-    </p>
   );
 }
 
@@ -922,7 +837,7 @@ function ScoreInput({
 }) {
   return (
     <label className="block">
-      <span className="mb-1.5 block truncate text-xs font-bold text-slate-400">
+      <span className="mb-1.5 block truncate text-xs font-black text-slate-500">
         {label}
       </span>
 
@@ -933,7 +848,7 @@ function ScoreInput({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        className="h-14 w-full rounded-2xl border border-white/10 bg-black/30 text-center text-2xl font-black text-white outline-none transition placeholder:text-slate-700 focus:border-emerald-300/40 focus:ring-4 focus:ring-emerald-400/10 disabled:cursor-not-allowed disabled:opacity-50"
+        className="h-12 w-full rounded-2xl border border-slate-200 bg-white text-center text-2xl font-black text-slate-950 outline-none transition placeholder:text-slate-300 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
         placeholder="0"
       />
     </label>
@@ -970,45 +885,45 @@ function PlayerPickerSheet({
   const selectedCount = selectedIds.length;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm">
-      <div className="mx-auto flex h-dvh w-full max-w-md flex-col bg-slate-950 text-white shadow-2xl">
-        <div className="border-b border-white/10 px-4 pb-3 pt-[calc(env(safe-area-inset-top)+14px)]">
+    <div className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-sm">
+      <div className="mx-auto flex h-dvh w-full max-w-md flex-col bg-slate-50 text-slate-950 shadow-2xl">
+        <div className="border-b border-slate-200 bg-white px-4 pb-3 pt-[calc(env(safe-area-inset-top)+14px)]">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-300">
+              <p className="text-[11px] font-black uppercase tracking-[0.16em] text-emerald-700">
                 Goal Scorers
               </p>
-              <h2 className="mt-1 truncate text-lg font-black text-white">
+              <h2 className="mt-1 truncate text-lg font-black text-slate-950">
                 {matchDisplayName(row)}
               </h2>
-              <p className="mt-1 text-xs text-slate-400">
-                {selectedCount} selected • {allPlayers.length} players loaded
+              <p className="mt-1 text-xs font-semibold text-slate-500">
+                {selectedCount} selected • {allPlayers.length} players
               </p>
             </div>
 
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-white active:scale-95"
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-700 active:scale-95"
             >
               <X className="h-4 w-4" />
             </button>
           </div>
 
-          <div className="mt-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-black/30 px-3 py-2.5">
-            <Search className="h-4 w-4 shrink-0 text-slate-500" />
+          <div className="mt-4 flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+            <Search className="h-4 w-4 shrink-0 text-slate-400" />
             <input
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="Search player, position or jersey..."
-              className="min-w-0 flex-1 bg-transparent text-sm font-medium text-white outline-none placeholder:text-slate-600"
+              placeholder="Search player..."
+              className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-950 outline-none placeholder:text-slate-400"
               autoFocus
             />
             {query && (
               <button
                 type="button"
                 onClick={() => onQueryChange("")}
-                className="text-slate-500"
+                className="text-slate-400"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1018,10 +933,10 @@ function PlayerPickerSheet({
 
         <div className="flex-1 overflow-y-auto px-4 py-4">
           {players.length === 0 ? (
-            <div className="flex min-h-[45dvh] flex-col items-center justify-center rounded-[2rem] border border-dashed border-white/15 bg-white/[0.04] px-8 text-center">
-              <p className="text-sm font-bold text-white">No players found</p>
+            <div className="flex min-h-[45dvh] flex-col items-center justify-center rounded-[1.75rem] border border-dashed border-slate-300 bg-white px-8 text-center">
+              <p className="text-sm font-black text-slate-950">No players found</p>
               <p className="mt-2 text-xs leading-5 text-slate-500">
-                Clear the search or refresh the page if players are missing.
+                Clear the search or refresh if players are missing.
               </p>
             </div>
           ) : (
@@ -1043,12 +958,12 @@ function PlayerPickerSheet({
           )}
         </div>
 
-        <div className="border-t border-white/10 bg-slate-950 px-4 pb-[calc(env(safe-area-inset-bottom)+14px)] pt-3">
+        <div className="border-t border-slate-200 bg-white px-4 pb-[calc(env(safe-area-inset-bottom)+14px)] pt-3">
           <div className="grid grid-cols-2 gap-3">
             <button
               type="button"
               onClick={onClear}
-              className="h-12 rounded-2xl border border-white/10 bg-white/10 text-sm font-black text-white active:scale-[0.99]"
+              className="h-12 rounded-2xl border border-slate-200 bg-white text-sm font-black text-slate-700 active:scale-[0.99]"
             >
               Clear
             </button>
@@ -1056,7 +971,7 @@ function PlayerPickerSheet({
             <button
               type="button"
               onClick={onClose}
-              className="h-12 rounded-2xl bg-emerald-500 text-sm font-black text-emerald-950 active:scale-[0.99]"
+              className="h-12 rounded-2xl bg-slate-950 text-sm font-black text-white active:scale-[0.99]"
             >
               Done
             </button>
@@ -1081,17 +996,17 @@ function PlayerGroup({
   return (
     <section>
       <div className="mb-2 flex items-center justify-between gap-2">
-        <h3 className="truncate text-xs font-black uppercase tracking-[0.16em] text-slate-500">
+        <h3 className="truncate text-xs font-black uppercase tracking-[0.14em] text-slate-400">
           {title}
         </h3>
-        <span className="rounded-full bg-white/10 px-2.5 py-1 text-[10px] font-bold text-slate-300 ring-1 ring-white/10">
+        <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-black text-slate-500 ring-1 ring-slate-200">
           {players.length}
         </span>
       </div>
 
       <div className="space-y-2">
         {players.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.04] px-4 py-5 text-center text-xs text-slate-500">
+          <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-center text-xs font-semibold text-slate-400">
             No players
           </div>
         ) : (
@@ -1105,25 +1020,25 @@ function PlayerGroup({
                 onClick={() => onToggle(player.player_id)}
                 className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition active:scale-[0.99] ${
                   selected
-                    ? "border-emerald-300/40 bg-emerald-400/10 text-white"
-                    : "border-white/10 bg-white/[0.04] text-slate-200"
+                    ? "border-emerald-300 bg-emerald-50 text-slate-950"
+                    : "border-slate-200 bg-white text-slate-800"
                 }`}
               >
                 <span
                   className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border ${
                     selected
-                      ? "border-emerald-300 bg-emerald-400 text-emerald-950"
-                      : "border-white/15 bg-black/20 text-transparent"
+                      ? "border-emerald-500 bg-emerald-500 text-white"
+                      : "border-slate-300 bg-white text-transparent"
                   }`}
                 >
                   <CheckCircle2 className="h-4 w-4" />
                 </span>
 
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold">
+                  <p className="truncate text-sm font-black">
                     {player.player_name}
                   </p>
-                  <p className="mt-0.5 truncate text-xs text-slate-500">
+                  <p className="mt-0.5 truncate text-xs font-semibold text-slate-400">
                     {player.position || "Player"}
                     {player.jersey_no ? ` • #${player.jersey_no}` : ""}
                   </p>
